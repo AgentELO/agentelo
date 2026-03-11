@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+src-tauri/target/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Signing
+*.cer
+*.p12
+*.key
+
+# Local data
+*.db
+*.db-journal
+
+# Build artifacts
+*.dmg
+*.zip
+*.app
