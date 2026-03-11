@@ -10,16 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "dashboard",
-        "title": "AgentELO",
-        "width": 960,
-        "height": 680,
-        "minWidth": 800,
-        "minHeight": 600
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self'; img-src 'self' https://*.googleusercontent.com; style-src 'self' 'unsafe-inline'"
     }

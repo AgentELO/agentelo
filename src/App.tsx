@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import {
   getStatus, getSessions, getSessionDetail, getBadges,
-  startRecording, stopRecording, login, logout, getAuthState,
+  login, logout, getAuthState,
   checkForUpdate,
 } from "./lib/api";
 import type { UpdateInfo } from "./lib/api";
@@ -28,6 +28,7 @@ function App() {
   const [syncing, setSyncing] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const insightsPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const wasRecordingRef = useRef(false);
 
   // Clean up insights polling on unmount
   useEffect(() => {
@@ -35,6 +36,46 @@ function App() {
       if (insightsPollRef.current) clearInterval(insightsPollRef.current);
     };
   }, []);
+
+  // Detect recording stop (from tray) and poll for insights
+  useEffect(() => {
+    if (!status) return;
+    const wasRecording = wasRecordingRef.current;
+    wasRecordingRef.current = status.recording;
+
+    if (wasRecording && !status.recording) {
+      // Recording just stopped — find the latest session and poll for insights
+      getSessions().then((sess) => {
+        const latest = sess.find((s) => s.stopped_at && s.elo_after == null);
+        const latestWithScore = sess.find((s) => s.stopped_at);
+        const target = latest || latestWithScore;
+        if (target) {
+          setTab("overview");
+          handleSelectSession(target.id);
+          if (insightsPollRef.current) clearInterval(insightsPollRef.current);
+          setSyncing(true);
+          let attempts = 0;
+          insightsPollRef.current = setInterval(async () => {
+            attempts++;
+            try {
+              const detail = await getSessionDetail(target.id);
+              setSelectedSession(detail);
+              if (detail.gemini_score_json || detail.insights_json || attempts >= 30) {
+                if (insightsPollRef.current) clearInterval(insightsPollRef.current);
+                insightsPollRef.current = null;
+                setSyncing(false);
+                loadData();
+              }
+            } catch {
+              if (insightsPollRef.current) clearInterval(insightsPollRef.current);
+              insightsPollRef.current = null;
+              setSyncing(false);
+            }
+          }, 2000);
+        }
+      });
+    }
+  }, [status?.recording]);
 
   // Check for updates on mount
   useEffect(() => {
@@ -126,60 +167,22 @@ function App() {
             </span>
           </div>
           <div className="flex items-center gap-3">
-            <button
-              disabled={syncing}
-              onClick={async () => {
-                try {
-                  if (status?.recording) {
-                    const result = await stopRecording();
-                    await loadData();
-                    // Extract session id from result message
-                    const match = result.match(/session (\d+)/);
-                    const stoppedId = match ? parseInt(match[1]) : null;
-                    if (stoppedId) {
-                      setTab("overview");
-                      await handleSelectSession(stoppedId);
-                      // Poll for insights (background sync takes a few seconds)
-                      if (insightsPollRef.current) clearInterval(insightsPollRef.current);
-                      setSyncing(true);
-                      let attempts = 0;
-                      insightsPollRef.current = setInterval(async () => {
-                        attempts++;
-                        try {
-                          const detail = await getSessionDetail(stoppedId);
-                          setSelectedSession(detail);
-                          if (detail.gemini_score_json || detail.insights_json || attempts >= 30) {
-                            if (insightsPollRef.current) clearInterval(insightsPollRef.current);
-                            insightsPollRef.current = null;
-                            setSyncing(false);
-                          }
-                        } catch {
-                          if (insightsPollRef.current) clearInterval(insightsPollRef.current);
-                          insightsPollRef.current = null;
-                          setSyncing(false);
-                        }
-                      }, 2000);
-                    }
-                  } else {
-                    await startRecording();
-                    await loadData();
-                  }
-                } catch (e) {
-                  setError(String(e));
-                  setSyncing(false);
-                }
-              }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
-                syncing
-                  ? "bg-brand/10 border border-brand/20 text-brand-light"
-                  : status?.recording
-                  ? "bg-danger/10 border border-danger/20 text-danger hover:bg-danger/20"
-                  : "bg-success/10 border border-success/20 text-success hover:bg-success/20"
-              }`}
-            >
-              <div className={`w-2 h-2 rounded-full ${syncing ? "bg-brand-light animate-pulse" : status?.recording ? "bg-danger animate-pulse" : "bg-success"}`} />
-              {syncing ? "Generating Insights..." : status?.recording ? "Stop Recording" : "Start Recording"}
-            </button>
+            {syncing ? (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-brand/10 border border-brand/20 text-brand-light">
+                <div className="w-2 h-2 rounded-full bg-brand-light animate-pulse" />
+                Generating Insights...
+              </div>
+            ) : status?.recording ? (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-success/10 border border-success/20 text-success">
+                <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
+                Recording
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/[0.05] border border-border text-text-muted">
+                <div className="w-2 h-2 rounded-full bg-text-muted" />
+                Paused
+              </div>
+            )}
             {status && (
               <span className="font-mono text-sm font-semibold text-brand-light">
                 {Math.round(status.current_elo).toLocaleString()}

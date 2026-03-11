@@ -137,8 +137,9 @@ fn get_badges() -> Result<Vec<db::Badge>, String> {
 // Recording commands
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-fn start_recording(app: tauri::AppHandle, state: State<AppState>) -> Result<String, String> {
+/// Shared start-recording logic used by both the Tauri command and tray handler.
+fn do_start_recording(app: &tauri::AppHandle) -> Result<i64, String> {
+    let state = app.state::<AppState>();
     let mut rec = state.recording.lock().unwrap();
     if rec.active {
         return Err("Already recording".to_string());
@@ -154,8 +155,14 @@ fn start_recording(app: tauri::AppHandle, state: State<AppState>) -> Result<Stri
     rec.session_id = Some(session_id);
     rec.active = true;
 
-    update_tray_for_recording(&app, true);
+    update_tray_for_recording(app, true);
 
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn start_recording(app: tauri::AppHandle, _state: State<AppState>) -> Result<String, String> {
+    let session_id = do_start_recording(&app)?;
     Ok(format!("Recording started (session {})", session_id))
 }
 
@@ -658,8 +665,7 @@ fn update_tray_elo(app: &tauri::AppHandle) {
 }
 
 fn handle_tray_record(app: &tauri::AppHandle) {
-    let state = app.state::<AppState>();
-    let is_recording = state.recording.lock().unwrap().active;
+    let is_recording = app.state::<AppState>().recording.lock().unwrap().active;
 
     if is_recording {
         let app_handle = app.clone();
@@ -667,23 +673,7 @@ fn handle_tray_record(app: &tauri::AppHandle) {
             let _ = do_stop_recording(&app_handle).await;
         });
     } else {
-        let conn = match db::get_conn() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let session_id = match db::create_session(&conn) {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-
-        let mut rec = state.recording.lock().unwrap();
-        let mut engine = capture::CaptureEngine::new(session_id);
-        engine.start();
-        rec.engine = Some(engine);
-        rec.session_id = Some(session_id);
-        rec.active = true;
-
-        update_tray_for_recording(app, true);
+        let _ = do_start_recording(app);
     }
 }
 
@@ -798,11 +788,16 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                if window.label() == "dashboard" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
             }
         })
         .setup(|app| {
+            // Tray-only: hide from dock on startup
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let record_item = MenuItem::with_id(app, "record", "Start Recording", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
             let elo_item = MenuItem::with_id(app, "elo", "ELO: 1,200", false, None::<&str>)?;
@@ -824,7 +819,12 @@ pub fn run() {
                 .tooltip("AgentELO")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
-                        app.exit(0);
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            // Stop recording gracefully before quitting
+                            let _ = do_stop_recording(&app_handle).await;
+                            app_handle.exit(0);
+                        });
                     }
                     "dashboard" => {
                         open_dashboard(app);
