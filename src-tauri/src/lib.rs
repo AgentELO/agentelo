@@ -194,9 +194,19 @@ async fn do_stop_recording(app: &tauri::AppHandle) -> Result<Option<i64>, String
     .await
     .map_err(|e| format!("DB error: {e}"))??;
 
-    // Upload to Gemini for scoring + insights
+    // Score the session: BYOK (local Gemini) or cloud
     let client = state.sync_client.lock().unwrap().clone();
-    if client.has_token() {
+    let byok_key = auth::load_api_key();
+
+    if let Some(key_config) = byok_key {
+        // BYOK: score locally, then sync scores-only to leaderboard
+        let sync_sid = sid;
+        let app_for_sync = app.clone();
+        tokio::spawn(async move {
+            score_locally_and_sync(app_for_sync, client, sync_sid, elo_before, key_config).await;
+        });
+    } else if client.has_token() {
+        // Cloud: upload screenshots + events to backend for Gemini scoring
         let sync_sid = sid;
         let app_for_sync = app.clone();
         tokio::spawn(async move {
@@ -292,6 +302,120 @@ async fn upload_and_score(
     }
 }
 
+/// BYOK: score session locally using user's own Gemini key, then sync scores-only.
+async fn score_locally_and_sync(
+    app: tauri::AppHandle,
+    client: sync::SyncClient,
+    sid: i64,
+    elo_before: f64,
+    key_config: auth::ApiKeyConfig,
+) {
+    // 1. Build events summary + sample screenshots (same prep as upload_and_score)
+    let upload_data = tokio::task::spawn_blocking(move || {
+        let conn = db::get_conn().ok()?;
+        let summary = db::build_events_summary(&conn, sid);
+        let screenshot_paths = db::get_screenshot_paths(&conn, sid);
+        let frames = sample_screenshots(&screenshot_paths);
+        let started_at = conn
+            .query_row(
+                "SELECT started_at FROM sessions WHERE id = ?",
+                [sid],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()?;
+        let stopped_at = conn
+            .query_row(
+                "SELECT stopped_at FROM sessions WHERE id = ?",
+                [sid],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()?;
+        Some((started_at, stopped_at, summary, frames))
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let Some((started_at, stopped_at, events_summary, frames)) = upload_data else {
+        return;
+    };
+
+    let summary_text = events_summary.as_deref().unwrap_or("No events captured");
+
+    // 2. Call Gemini directly with user's own key
+    let gemini_result =
+        analysis::gemini::score_session_locally(&key_config.api_key, summary_text, &frames).await;
+
+    let sync_sid = sid;
+    match gemini_result {
+        Ok(result) => {
+            let scores = result.scores.clone();
+            let insights = result.insights_markdown.clone();
+            let scores_for_sync = result.scores.clone();
+
+            // 3. Save scores + insights to local SQLite
+            let new_elo = tokio::task::spawn_blocking(move || {
+                let conn = match db::get_conn() {
+                    Ok(c) => c,
+                    Err(_) => return elo_before,
+                };
+                let _ = db::save_insights(&conn, sync_sid, &insights);
+                let scores_str = serde_json::to_string(&scores).unwrap_or_default();
+                let _ = db::save_gemini_scores(&conn, sync_sid, &scores_str);
+
+                // 4. Calculate ELO locally
+                let overall = scores.get("overall").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let new_elo = analysis::scorer::calculate_elo(elo_before, overall, 32.0);
+                let _ = db::update_session_scores(&conn, sync_sid, new_elo, 50.0, &scores_str);
+                new_elo
+            })
+            .await
+            .unwrap_or(elo_before);
+
+            update_tray_elo(&app);
+
+            // 5. Sync scores-only to leaderboard (no screenshots, no events)
+            if client.has_token() {
+                let duration = chrono::DateTime::parse_from_rfc3339(&stopped_at)
+                    .ok()
+                    .and_then(|stop| {
+                        chrono::DateTime::parse_from_rfc3339(&started_at)
+                            .ok()
+                            .map(|start| (stop - start).num_seconds())
+                    })
+                    .unwrap_or(0);
+
+                let scores_str =
+                    serde_json::to_string(&scores_for_sync).unwrap_or_default();
+                let upload = sync::SessionUpload {
+                    started_at,
+                    stopped_at,
+                    duration_sec: duration,
+                    elo_before,
+                    elo_after: new_elo,
+                    score_json: Some(scores_str),
+                    events_summary_json: None, // intentionally omit — prevents backend re-scoring
+                    screenshot_frames: vec![], // never send screenshots in BYOK mode
+                };
+                // Fire and forget — don't overwrite local data from response
+                let _ = client.upload_session(&upload).await;
+            }
+        }
+        Err(e) => {
+            // Save error so UI can display it
+            eprintln!("BYOK Gemini scoring failed: {e}");
+            let error_json = serde_json::json!({"error": e}).to_string();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(conn) = db::get_conn() {
+                    let _ = db::update_session_scores(&conn, sync_sid, elo_before, 50.0, &error_json);
+                }
+            })
+            .await;
+        }
+    }
+}
+
 #[tauri::command]
 async fn stop_recording(app: tauri::AppHandle, _state: State<'_, AppState>) -> Result<String, String> {
     match do_stop_recording(&app).await {
@@ -335,6 +459,44 @@ fn get_auth_state(state: State<AppState>) -> Result<Option<sync::UserInfo>, Stri
 }
 
 // ---------------------------------------------------------------------------
+// BYOK — Gemini API key management
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ApiKeyConfigResponse {
+    masked_key: String,
+}
+
+#[tauri::command]
+fn get_api_key_config() -> Option<ApiKeyConfigResponse> {
+    let config = auth::load_api_key()?;
+    let key = &config.api_key;
+    let masked = if key.len() > 4 {
+        format!("...{}", &key[key.len() - 4..])
+    } else {
+        "****".to_string()
+    };
+    Some(ApiKeyConfigResponse { masked_key: masked })
+}
+
+#[tauri::command]
+fn save_api_key_config(api_key: String) -> Result<(), String> {
+    if api_key.trim().is_empty() {
+        return Err("API key cannot be empty".to_string());
+    }
+    auth::save_api_key(&auth::ApiKeyConfig {
+        api_key: api_key.trim().to_string(),
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_api_key_config() -> Result<(), String> {
+    auth::clear_api_key();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Cloud sync commands
 // ---------------------------------------------------------------------------
 
@@ -356,13 +518,21 @@ async fn sync_session(
         return Err("Not logged in".to_string());
     }
 
+    // BYOK guard: never send screenshots or events if user has their own Gemini key
+    let is_byok = auth::load_api_key().is_some();
+
     let (detail, events_summary, frames) = tokio::task::spawn_blocking(move || {
         let conn = db::get_conn().map_err(|e| e.to_string())?;
         let d = db::get_session_detail(&conn, session_id).map_err(|e| e.to_string())?;
-        let summary = db::build_events_summary(&conn, session_id);
-        let paths = db::get_screenshot_paths(&conn, session_id);
-        let frames = sample_screenshots(&paths);
-        Ok::<_, String>((d, summary, frames))
+        if is_byok {
+            // BYOK: scores only, no screenshots or events
+            Ok::<_, String>((d, None, vec![]))
+        } else {
+            let summary = db::build_events_summary(&conn, session_id);
+            let paths = db::get_screenshot_paths(&conn, session_id);
+            let frames = sample_screenshots(&paths);
+            Ok::<_, String>((d, summary, frames))
+        }
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -619,6 +789,9 @@ pub fn run() {
             login,
             logout,
             get_auth_state,
+            get_api_key_config,
+            save_api_key_config,
+            clear_api_key_config,
             get_leaderboard_data,
             sync_session,
             check_for_update,

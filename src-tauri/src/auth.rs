@@ -76,6 +76,40 @@ pub fn clear_auth() {
     let _ = std::fs::remove_file(auth_file_path());
 }
 
+// ---------------------------------------------------------------------------
+// BYOK — Gemini API key storage
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ApiKeyConfig {
+    pub api_key: String,
+}
+
+fn api_key_file_path() -> PathBuf {
+    agentelo_dir().join("gemini_key.json")
+}
+
+pub fn load_api_key() -> Option<ApiKeyConfig> {
+    let data = std::fs::read_to_string(api_key_file_path()).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+pub fn save_api_key(config: &ApiKeyConfig) {
+    if let Ok(data) = serde_json::to_string_pretty(config) {
+        let path = api_key_file_path();
+        let _ = std::fs::write(&path, &data);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+pub fn clear_api_key() {
+    let _ = std::fs::remove_file(api_key_file_path());
+}
+
 /// Run the full OAuth flow:
 /// 1. Bind a local TCP server on a random port
 /// 2. Open system browser to backend's desktop auth start endpoint

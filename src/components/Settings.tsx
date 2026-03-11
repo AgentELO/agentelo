@@ -1,4 +1,6 @@
+import { useState, useEffect, useRef } from "react";
 import type { UserInfo } from "../lib/types";
+import { getApiKeyConfig, saveApiKeyConfig, clearApiKeyConfig } from "../lib/api";
 
 interface SettingsProps {
   user: UserInfo | null;
@@ -9,8 +11,42 @@ interface SettingsProps {
 export function Settings({ user, onLogin, onLogout }: SettingsProps) {
   const isSignedIn = !!user?.email;
 
+  const [maskedKey, setMaskedKey] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const keyRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    getApiKeyConfig().then((config) => {
+      setMaskedKey(config?.masked_key ?? null);
+    });
+  }, []);
+
+  const handleSave = async () => {
+    const key = keyRef.current?.value?.trim();
+    if (!key) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await saveApiKeyConfig(key);
+      const config = await getApiKeyConfig();
+      setMaskedKey(config?.masked_key ?? null);
+      if (keyRef.current) keyRef.current.value = "";
+    } catch (e) {
+      setError(String(e));
+    }
+    setSaving(false);
+  };
+
+  const handleClear = async () => {
+    await clearApiKeyConfig();
+    setMaskedKey(null);
+    setError(null);
+  };
+
   return (
     <div className="space-y-6">
+      {/* Account */}
       <div className="bg-surface-raised rounded-xl border border-border p-6">
         <h3 className="text-sm font-medium text-text-secondary mb-4">Account</h3>
 
@@ -65,6 +101,59 @@ export function Settings({ user, onLogin, onLogout }: SettingsProps) {
               </svg>
               Sign in with Google
             </button>
+          </div>
+        )}
+      </div>
+
+      {/* BYOK — Gemini API Key */}
+      <div className="bg-surface-raised rounded-xl border border-border p-6">
+        <h3 className="text-sm font-medium text-text-secondary mb-4">AI Scoring</h3>
+
+        {maskedKey ? (
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-sm font-medium">Gemini API Key</div>
+                <div className="text-xs text-text-muted font-mono mt-1">{maskedKey}</div>
+              </div>
+              <button
+                onClick={handleClear}
+                className="text-xs text-text-muted hover:text-danger transition-colors"
+              >
+                Clear
+              </button>
+            </div>
+            <p className="text-xs text-brand">
+              Using your own key — screenshots never leave your device.
+            </p>
+          </div>
+        ) : (
+          <div>
+            <p className="text-xs text-text-muted mb-4">
+              Screenshots are sent to AgentELO cloud for scoring. Add your own Gemini API key to keep screenshots on your device.
+            </p>
+            <div className="flex gap-2">
+              <input
+                ref={keyRef}
+                type="password"
+                placeholder="Gemini API key"
+                className="flex-1 px-3 py-2 rounded-lg bg-white/[0.05] border border-border text-sm font-mono placeholder:text-text-muted/50 focus:outline-none focus:border-brand/40"
+              />
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-4 py-2 rounded-lg bg-brand text-[#09090b] text-sm font-medium hover:bg-brand-light transition-colors disabled:opacity-50"
+              >
+                {saving ? "..." : "Save"}
+              </button>
+            </div>
+            {error && (
+              <p className="text-xs text-danger mt-2">{error}</p>
+            )}
+            <p className="text-xs text-text-muted mt-3">
+              Get a free key at{" "}
+              <span className="text-text-secondary">aistudio.google.com</span>
+            </p>
           </div>
         )}
       </div>

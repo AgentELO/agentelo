@@ -72,6 +72,10 @@ export const BADGE_INFO: Record<string, { name: string; icon: string; descriptio
   manual_mode: { name: "Manual Mode", icon: "MM", description: "Score below 30" },
 };
 
+export interface ApiKeyConfigResponse {
+  masked_key: string;
+}
+
 export const CATEGORY_LABELS: Record<string, string> = {
   delegation: "Delegation",
   iteration: "Iteration",

@@ -1,7 +1,7 @@
 {
   "name": "agentelo",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Track how AI-natively you work. What's your AgentELO?",
   "license": "MIT",
   "repository": "https://github.com/AgentELO/agentelo",

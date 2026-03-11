@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CurrentStatus, SessionSummary, SessionDetail, Badge,
-  UserInfo, LeaderboardEntry,
+  UserInfo, LeaderboardEntry, ApiKeyConfigResponse,
 } from "./types";
 
 // Local data
@@ -41,6 +41,19 @@ export async function logout(): Promise<void> {
 
 export async function getAuthState(): Promise<UserInfo | null> {
   return invoke("get_auth_state");
+}
+
+// BYOK — Gemini API key
+export async function getApiKeyConfig(): Promise<ApiKeyConfigResponse | null> {
+  return invoke("get_api_key_config");
+}
+
+export async function saveApiKeyConfig(apiKey: string): Promise<void> {
+  return invoke("save_api_key_config", { apiKey });
+}
+
+export async function clearApiKeyConfig(): Promise<void> {
+  return invoke("clear_api_key_config");
 }
 
 // Cloud sync
